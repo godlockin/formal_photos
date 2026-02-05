@@ -1,0 +1,71 @@
+import { generateCSPHeader, CSP_CONFIG } from '../utils/security';
+
+interface SecurityHeadersConfig {
+  csp?: boolean;
+  xssProtection?: boolean;
+  contentTypeOptions?: boolean;
+  frameOptions?: boolean;
+  referrerPolicy?: boolean;
+  permissionsPolicy?: boolean;
+}
+
+export function createSecurityHeaders(config: SecurityHeadersConfig = {}): Record<string, string> {
+  const {
+    csp = true,
+    xssProtection = true,
+    contentTypeOptions = true,
+    frameOptions = true,
+    referrerPolicy = true,
+    permissionsPolicy = true,
+  } = config;
+
+  const headers: Record<string, string> = {};
+
+  if (csp) {
+    headers['Content-Security-Policy'] = generateCSPHeader();
+  }
+
+  if (xssProtection) {
+    headers['X-XSS-Protection'] = '1; mode=block';
+  }
+
+  if (contentTypeOptions) {
+    headers['X-Content-Type-Options'] = 'nosniff';
+  }
+
+  if (frameOptions) {
+    headers['X-Frame-Options'] = 'DENY';
+  }
+
+  if (referrerPolicy) {
+    headers['Referrer-Policy'] = 'strict-origin-when-cross-origin';
+  }
+
+  if (permissionsPolicy) {
+    headers['Permissions-Policy'] = [
+      'camera=(self)',
+      'microphone=()',
+      'geolocation=()',
+      'payment=()',
+    ].join(', ');
+  }
+
+  // Additional security headers
+  headers['Cross-Origin-Embedder-Policy'] = 'require-corp';
+  headers['Cross-Origin-Opener-Policy'] = 'same-origin';
+  headers['Cross-Origin-Resource-Policy'] = 'same-origin';
+
+  return headers;
+}
+
+// Cloudflare Pages Function middleware
+export async function securityMiddleware(request: Request): Promise<Headers> {
+  const headers = new Headers();
+  const securityHeaders = createSecurityHeaders();
+  
+  for (const [key, value] of Object.entries(securityHeaders)) {
+    headers.set(key, value);
+  }
+
+  return headers;
+}
