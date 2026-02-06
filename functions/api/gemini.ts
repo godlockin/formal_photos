@@ -213,7 +213,7 @@ export async function onRequestPost({ request, env }: { request: Request; env: E
   const config = parseEnv(env);
 
   try {
-    const body = await request.json();
+    const body: any = await request.json();
     const check = validate(body, config);
     if (!check.valid) {
       return new Response(JSON.stringify({ error: check.error }), { status: 401, headers: cors });
