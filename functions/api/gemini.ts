@@ -157,7 +157,7 @@ ${data.prompt}
   }
 }
 
-function validate(body: any, config: ReturnType<typeof parseEnv>): { valid: boolean; error?: string } {
+function validate(body: any, config: ReturnType<typeof parseEnv>): { valid: boolean; type?: string; error?: string } {
   if (!body || typeof body !== 'object') {
     return { valid: false, error: 'INVALID_REQUEST' };
   }
@@ -188,7 +188,7 @@ function validate(body: any, config: ReturnType<typeof parseEnv>): { valid: bool
     return { valid: false, error: 'FEATURE_DISABLED' };
   }
 
-  return { valid: true };
+  return { valid: true, type: codeResult.type };
 }
 
 export async function onRequestPost({ request, env }: { request: Request; env: Env }) {
