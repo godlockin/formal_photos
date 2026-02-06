@@ -1,0 +1,6 @@
+# Cloudflare Workers + Assets 配置
+compatibility_date = "2024-04-01"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
