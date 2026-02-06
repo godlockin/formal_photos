@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { setInviteCode, getInviteCode, hasInviteCode } from './api';
+import { setInviteCode, getInviteCode, hasInviteCode, analyze } from './api';
 
 // 邀请码配置（前端仅显示，不验证）
 const INVITE_CODES = [
@@ -202,7 +202,6 @@ function AnalyzeStep({ onNext }: { onNext: () => void }) {
 
     const runAnalysis = async () => {
       try {
-        const { analyze } = await import('./api');
         const image = localStorage.getItem('upload_image') || '';
         const person = await analyze(image);
         
