@@ -1,20 +1,32 @@
-import type { Person, Prompt, Photo } from './types';
+import type { Person, Design, Prompt, Photo, ReviewResult, ExpertRole } from './types';
 
-// Cloudflare Pages Functions 端点
 const API_URL = import.meta.env.VITE_API_URL || '/api/gemini';
 
-// 从本地存储获取邀请码
 function getCode(): string {
   return localStorage.getItem('invite_code') || '';
 }
 
-async function callAPI(action: string, image?: string, data?: any): Promise<string> {
+interface APIResponse<T> {
+  result: T;
+  action: string;
+  codeType?: string;
+  error?: string;
+}
+
+async function callAPI<T>(action: string, image?: string, data?: any): Promise<T> {
   const code = getCode();
-  
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Timestamp': String(Date.now()),
+  };
+
+  const body = JSON.stringify({ code, action, image, data });
+
   const res = await fetch(API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, action, image, data }),
+    headers,
+    body,
   });
 
   if (!res.ok) {
@@ -28,62 +40,77 @@ async function callAPI(action: string, image?: string, data?: any): Promise<stri
     if (err.error === 'INVITE_CODE_EXHAUSTED') {
       throw new Error('邀请码已用完');
     }
+    if (err.error === 'RATE_LIMIT_EXCEEDED') {
+      const retryAfter = err.retryAfter || 60;
+      throw new Error(`请求过于频繁，请${retryAfter}秒后重试`);
+    }
+    if (err.error === 'INVALID_SIGNATURE') {
+      throw new Error('请求验证失败');
+    }
+    if (err.error === 'REQUEST_EXPIRED') {
+      throw new Error('请求已过期，请刷新页面重试');
+    }
     throw new Error(err.error || '请求失败');
   }
 
-  const body = await res.json();
-  if (body.error) throw new Error(body.error);
-  return body.result;
+  const bodyJson: APIResponse<T> = await res.json();
+  if (bodyJson.error) throw new Error(bodyJson.error);
+  return bodyJson.result;
 }
 
-// 1. 分析人物
 export async function analyze(image: string): Promise<Person> {
-  return JSON.parse(await callAPI('analyze', image));
+  return callAPI<Person>('analyze', image);
 }
 
-// 2. 构建Prompt
-export async function buildPrompt(person: Person): Promise<Prompt> {
-  return JSON.parse(await callAPI('buildPrompt', undefined, person));
+export async function design(person: Person): Promise<Design> {
+  return callAPI<Design>('design', undefined, person);
 }
 
-// 3. 专家评审
-export async function review(content: string, image?: string) {
-  return JSON.parse(await callAPI('review', image, { content }));
+export async function buildPrompt(person: Person, design: Design): Promise<Prompt> {
+  return callAPI<Prompt>('buildPrompt', undefined, { person, design });
 }
 
-// 4. 生成照片
+export async function review(content: string, image?: string): Promise<ReviewResult> {
+  return callAPI<ReviewResult>('review', image, { content });
+}
+
 export async function generate(prompt: Prompt, type: string): Promise<string> {
-  return await callAPI('generate', undefined, { prompt, type });
+  return callAPI<string>('generate', undefined, { ...prompt, type });
 }
 
-// 5. 完整流程
-export async function process(image: string) {
+export async function finalCheck(image: string, person: Person, prompt: Prompt): Promise<ReviewResult> {
+  return callAPI<ReviewResult>('finalCheck', image, { person, prompt });
+}
+
+export async function processAll(image: string): Promise<{
+  person: Person;
+  designResult: Design;
+  prompt: Prompt;
+  photos: Photo[];
+}> {
   const person = await analyze(image);
-  const prompt = await buildPrompt(person);
-  
-  const r = await review(`Prompt:${JSON.stringify(prompt)} Person:${JSON.stringify(person)}`);
-  if (!r.approved) throw new Error(`评审未通过(${r.overallScore}分)`);
+  const designResult = await design(person);
+  const generatedPrompt = await buildPrompt(person, designResult);
 
   const types = ['正面头像', '侧面头像', '肖像照', '半身照', '全身照'];
   const photos: Photo[] = [];
-  
-  for (const t of types) {
-    const url = await generate(prompt, t);
-    const pr = await review(`类型:${t}`, url);
+
+  for (const type of types) {
+    const url = await generate(generatedPrompt, type);
+    const photoReview = await review(`类型:${type}`, url);
     photos.push({
-      id: `${t}-${Date.now()}`,
-      type: t,
+      id: `${type}-${Date.now()}`,
+      type,
       url,
-      approved: pr.overallScore >= 80,
-      review: { score: pr.overallScore, comments: pr.summary, approved: pr.overallScore >= 80 },
+      approved: photoReview.approved,
+      review: photoReview,
     });
   }
-  
-  return { person, prompt, photos };
+
+  return { person, designResult, prompt: generatedPrompt, photos };
 }
 
-// 邀请码管理
-export function setInviteCode(code: string) {
+export function setInviteCode(code: string): void {
   localStorage.setItem('invite_code', code.toUpperCase());
 }
 
@@ -93,4 +120,8 @@ export function getInviteCode(): string {
 
 export function hasInviteCode(): boolean {
   return !!getInviteCode();
+}
+
+export function clearInviteCode(): void {
+  localStorage.removeItem('invite_code');
 }
