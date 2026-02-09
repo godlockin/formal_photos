@@ -14,6 +14,15 @@ interface Env {
   HIGH_QUALITY_MODEL_FALLBACK?: string;
   GENERATE_MODEL?: string;
   GENERATE_MODEL_FALLBACK?: string;
+  INVITE_CODE_MAX_USES?: string;
+  REVIEW_PASS_THRESHOLD?: string;
+  PHOTO_APPROVAL_THRESHOLD?: string;
+  ENABLE_ANALYZE?: string;
+  ENABLE_GENERATE?: string;
+  ENABLE_REVIEW?: string;
+  ENABLE_RATE_LIMIT?: string;
+  RATE_LIMIT_REQUESTS?: string;
+  RATE_LIMIT_WINDOW?: string;
 }
 
 interface Config {
@@ -26,6 +35,23 @@ interface Config {
 const MODELS = {
   ANALYSIS: 'gemini-3-pro-preview',
   GENERATION: 'gemini-3-pro-image-preview',
+};
+
+const DEFAULT_ENV: Partial<Env> = {
+  FAST_MODEL: 'gemini-2.5-flash',
+  FAST_MODEL_FALLBACK: 'gemini-2.5-flash-lite',
+  HIGH_QUALITY_MODEL: 'gemini-3-pro-preview',
+  HIGH_QUALITY_MODEL_FALLBACK: 'gemini-2.5-pro',
+  GENERATE_MODEL: 'gemini-3-pro-image-preview',
+  GENERATE_MODEL_FALLBACK: 'gemini-2.5-flash-image',
+  REVIEW_PASS_THRESHOLD: '80',
+  PHOTO_APPROVAL_THRESHOLD: '80',
+  ENABLE_ANALYZE: 'true',
+  ENABLE_GENERATE: 'true',
+  ENABLE_REVIEW: 'true',
+  ENABLE_RATE_LIMIT: 'true',
+  RATE_LIMIT_REQUESTS: '10',
+  RATE_LIMIT_WINDOW: '60000',
 };
 
 const ITERATION_LIMITS = {
@@ -241,9 +267,10 @@ export async function onRequestPost({ request, env }: { request: Request; env: E
     }
     incrementCodeUsage(code);
 
-    const genAI = createGeminiClient(env.GEMINI_API_KEY);
-    const analysisModels = getModelCandidates('analysis', env);
-    const generationModels = getModelCandidates('generation', env);
+    const normalizedEnv: Env = { ...DEFAULT_ENV, ...env } as Env;
+    const genAI = createGeminiClient(normalizedEnv.GEMINI_API_KEY);
+    const analysisModels = getModelCandidates('analysis', normalizedEnv);
+    const generationModels = getModelCandidates('generation', normalizedEnv);
     let result: any;
 
     switch (action) {
