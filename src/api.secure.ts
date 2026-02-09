@@ -88,6 +88,10 @@ async function callAPI<T>(action: string, image?: string, data?: any): Promise<T
     if (err.error === 'REQUEST_EXPIRED') {
       throw new Error('请求已过期，请刷新页面重试');
     }
+    if (err.error === 'SERVICE_UNAVAILABLE') {
+      const msg = err.message || '服务未就绪，请检查后端环境变量配置';
+      throw new Error(msg);
+    }
     throw new Error(err.error || '请求失败');
   }
 
