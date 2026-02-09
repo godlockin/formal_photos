@@ -1,11 +1,99 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-.card { @apply bg-white rounded-xl shadow-lg p-6; }
-.btn-primary { @apply bg-primary-600 hover:bg-primary-700 text-white font-semibold py-3 px-6 rounded-lg transition; }
-.input { @apply w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500; }
-.loading-spinner { @apply animate-spin h-8 w-8 border-4 border-primary-200 border-t-primary-600 rounded-full mx-auto; }
+:root {
+  --ink: 17 17 17;
+  --ink-muted: 84 84 84;
+  --brand: 14 64 46;
+  --brand-strong: 10 43 32;
+  --accent: 207 178 129;
+  --surface: 255 255 255;
+  --glass: 255 255 255;
+}
+
+body {
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  color: rgb(var(--ink));
+  background:
+    radial-gradient(900px 480px at 10% -10%, rgba(207,178,129,0.18) 0%, transparent 60%),
+    radial-gradient(1100px 520px at 90% 0%, rgba(14,64,46,0.16) 0%, transparent 55%),
+    linear-gradient(180deg, #f8f6f2 0%, #f1f0ec 100%);
+}
+
+@layer components {
+  .page {
+    @apply min-h-screen px-4 py-10 md:px-8;
+  }
+
+  .shell {
+    @apply mx-auto w-full max-w-6xl;
+  }
+
+  .hero-title {
+    font-family: "Cormorant Garamond", serif;
+    @apply text-3xl md:text-5xl font-semibold tracking-tight text-[#1d1b16];
+  }
+
+  .hero-subtitle {
+    @apply text-base md:text-lg text-[#6b6256];
+  }
+
+  .panel {
+    @apply rounded-2xl border border-white/70 bg-white/75 shadow-[0_30px_70px_rgba(20,20,20,0.12)] backdrop-blur;
+  }
+
+  .panel-strong {
+    @apply rounded-2xl border border-[#e7e1d8] bg-white shadow-[0_24px_60px_rgba(20,20,20,0.12)];
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-[#0e402e] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[#0a2b20];
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-[#e2dacd] bg-white/80 px-5 py-3 text-sm font-semibold text-[#4a433a] transition hover:border-[#d6c9b8] hover:text-[#1f1b17];
+  }
+
+  .input {
+    @apply w-full rounded-xl border border-[#e2dacd] bg-white/95 px-4 py-3 text-sm text-[#2c2620] placeholder:text-[#9a8f81] focus:border-[#bda982] focus:outline-none focus:ring-2 focus:ring-[#e4d7c0];
+  }
+
+  .tag {
+    @apply inline-flex items-center rounded-full border border-[#e2dacd] bg-white px-3 py-1 text-xs font-semibold text-[#6b6256];
+  }
+
+  .step-dot {
+    @apply h-2.5 w-2.5 rounded-full bg-[#cbb89a];
+  }
+
+  .timeline {
+    @apply space-y-4;
+  }
+
+  .timeline-item {
+    @apply relative pl-8;
+  }
+
+  .timeline-line {
+    @apply absolute left-3 top-3 h-full w-px bg-[#e2dacd];
+  }
+
+  .timeline-dot {
+    @apply absolute left-2 top-1.5 h-3.5 w-3.5 rounded-full border-2 border-white shadow;
+  }
+
+  .timeline-dot.pending { @apply bg-[#d8cbb7]; }
+  .timeline-dot.active { @apply bg-[#0e402e]; }
+  .timeline-dot.completed { @apply bg-[#2a6d4f]; }
+  .timeline-dot.error { @apply bg-[#c27b5b]; }
+
+  .status-pill {
+    @apply inline-flex items-center rounded-full border border-[#e2dacd] bg-white px-2.5 py-1 text-xs font-semibold text-[#5c5348];
+  }
+}
+
 .fade-in { animation: fadeIn 0.5s ease-out; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }

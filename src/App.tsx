@@ -1,164 +1,231 @@
-import { useState, useEffect, useCallback } from 'react';
-import { analyze, design, buildPrompt, generate, review, finalCheck, clearInviteCode } from './api';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { analyze, reviewInput, processPose, setOriginalImage, clearInviteCode } from './api';
 import { useWorkflowStore } from './store';
-import type { Person, Design, Prompt, Photo, ReviewResult, ExpertRole } from './types';
+import type { Person, Photo, ReviewResult } from './types';
 
-const MAX_RETRY_COUNT = 3;
-const MIN_CONSENSUS = 85;
-const MIN_EXPERT = 80;
-const MIN_DIRECTOR = 90;
+const PHOTO_TYPES = [
+  { id: '正面头像', label: '正面头像', desc: '标准证件照视角' },
+  { id: '侧面头像', label: '侧面头像', desc: '90度侧面轮廓' },
+  { id: '肖像照', label: '肖像照', desc: '胸部以上特写' },
+  { id: '半身照', label: '半身照', desc: '腰部以上半身' },
+  { id: '全身照', label: '全身照', desc: '全身职业形象' },
+];
 
-const EXPERT_LABELS: Record<ExpertRole, { name: string; color: string }> = {
-  MAKEUP_ARTIST: { name: '化妆师', color: 'bg-pink-100 text-pink-700' },
-  STYLIST: { name: '服装师', color: 'bg-purple-100 text-purple-700' },
-  POSTURE_COACH: { name: '形态教练', color: 'bg-green-100 text-green-700' },
-  LIGHTING_SPEC: { name: '灯光师', color: 'bg-yellow-100 text-yellow-700' },
-  PHOTOGRAPHER: { name: '摄影师', color: 'bg-blue-100 text-blue-700' },
-  DIRECTOR: { name: '导演', color: 'bg-red-100 text-red-700' },
-};
-
-function ExpertBadge({ role }: { role: ExpertRole }) {
-  const label = EXPERT_LABELS[role];
-  return (
-    <span className={`text-xs px-2 py-1 rounded-full ${label.color}`}>
-      {label.name}
-    </span>
-  );
-}
-
-function QualityScore({ score, label, threshold }: { score: number; label: string; threshold: number }) {
-  const color = score >= threshold ? 'text-green-600' : score >= threshold - 5 ? 'text-yellow-600' : 'text-red-600';
-  return (
-    <div className="text-center">
-      <div className={`text-2xl font-bold ${color}`}>{score}</div>
-      <div className="text-xs text-gray-500">{label}</div>
-      <div className="text-xs text-gray-400">需≥{threshold}</div>
-    </div>
-  );
-}
-
-interface AuditStep {
+// 处理步骤
+interface ProcessingStep {
   name: string;
-  score: number | null;
-  passed: boolean;
-  experts: { expert: string; score: number }[];
+  status: 'pending' | 'active' | 'completed' | 'error';
 }
 
-interface AuditTrailProps {
-  steps: AuditStep[];
+// 姿势处理状态
+interface PoseState {
+  type: string;
+  status: 'pending' | 'generating' | 'completed' | 'error';
+  progress: number;
+  step: number; // 当前步骤索引
+  promptIteration: number; // Prompt重构迭代次数
+  generationIteration: number; // 生成迭代次数
+  photo?: Photo;
+  currentReview?: ReviewResult;
+  error?: string;
+  steps: ProcessingStep[];
 }
 
-function AuditTrail({ steps }: AuditTrailProps) {
+// Review Panel Component
+function ReviewPanel({ review, title }: { review: ReviewResult | null; title?: string }) {
+  if (!review) return <div className="text-gray-400 text-sm">审核中...</div>;
+  
+  const score = review.overallScore || review.consensusScore || 0;
+  const isApproved = review.approved || score >= 70;
+  const iterations = review.iteration || 1;
+  
   return (
-    <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-100">
-      <h4 className="font-semibold text-gray-800 mb-4">质量审核追踪</h4>
-      <div className="space-y-3">
-        {steps.map((step, i) => (
-          <div key={step.name} className={`flex items-center gap-3 p-2 rounded ${step.passed ? 'bg-green-50' : 'bg-gray-50'}`}>
-            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${step.passed ? 'bg-green-500 text-white' : 'bg-gray-300 text-gray-500'
-              }`}>
-              {step.passed ? '✓' : '○'}
-            </div>
-            <span className="flex-1 text-sm">{step.name}</span>
-            {step.score !== null && (
-              <span className={`text-sm font-medium ${step.score >= MIN_CONSENSUS ? 'text-green-600' : 'text-yellow-600'}`}>
-                {step.score}分
-              </span>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ReviewPanel({ review: reviewData, stage }: { review: ReviewResult; stage: string }) {
-  const getScoreColor = (score: number) => {
-    if (score >= MIN_CONSENSUS) return 'text-green-600';
-    if (score >= MIN_EXPERT) return 'text-yellow-600';
-    return 'text-red-600';
-  };
-
-  const getApprovalStatus = (score: number, role: string) => {
-    const minThreshold = role === 'DIRECTOR' ? MIN_DIRECTOR : MIN_EXPERT;
-    return score >= minThreshold;
-  };
-
-  const failedExperts = reviewData.reviews.filter(r => !getApprovalStatus(r.score, r.expert));
-
-  return (
-    <div className="space-y-4">
-      <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-100">
-        <div className="flex items-center justify-between mb-4">
-          <h4 className="font-semibold text-gray-800">{stage}</h4>
-          <span className={`px-3 py-1 rounded-full text-sm font-medium ${reviewData.approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-            }`}>
-            {reviewData.approved ? '✓ 通过' : '⟳ 优化中'}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-3 gap-4 mb-4">
-          <QualityScore score={reviewData.consensusScore} label="综合评分" threshold={MIN_CONSENSUS} />
-          <div className="text-center">
-            <div className="text-2xl font-bold text-blue-600">
-              {reviewData.reviews.filter(r => r.score >= MIN_CONSENSUS).length}/6
-            </div>
-            <div className="text-xs text-gray-500">专家通过</div>
-            <div className="text-xs text-gray-400">需≥5/6</div>
-          </div>
-          {reviewData.passRate !== undefined && (
-            <QualityScore score={reviewData.passRate} label="照片通过率" threshold={80} />
-          )}
-        </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
-          {reviewData.reviews.map((r) => {
-            const minThreshold = r.expert === 'DIRECTOR' ? MIN_DIRECTOR : MIN_EXPERT;
-            return (
-              <div key={r.expert} className={`p-2 rounded border ${r.score >= minThreshold ? 'border-green-200 bg-green-50' : 'border-yellow-200 bg-yellow-50'
-                }`}>
-                <div className="flex items-center justify-between mb-1">
-                  <ExpertBadge role={r.expert as ExpertRole} />
-                  <span className={`font-bold ${getScoreColor(r.score)}`}>{r.score}</span>
-                </div>
-                <p className="text-xs text-gray-600 line-clamp-2">{r.comments}</p>
-              </div>
-            );
-          })}
-        </div>
-
-        {failedExperts.length > 0 && (
-          <div className="p-3 bg-yellow-50 rounded-lg">
-            <div className="text-sm font-medium text-yellow-700 mb-1">待改进专家：</div>
-            <div className="flex flex-wrap gap-2">
-              {failedExperts.map(f => (
-                <span key={f.expert} className="text-xs px-2 py-1 bg-yellow-100 rounded">
-                  {EXPERT_LABELS[f.expert as ExpertRole]?.name || f.expert}: {f.score}分
-                </span>
-              ))}
-            </div>
-          </div>
+    <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-3 text-sm">
+      {title && <div className="font-medium text-[#4a433a] mb-1">{title}</div>}
+      <div className="flex items-center gap-2">
+        <span className={`font-semibold ${isApproved ? 'text-[#2a6d4f]' : 'text-[#7a5a2e]'}`}>
+          {score}分
+        </span>
+        <span className={`text-xs px-2 py-0.5 rounded-full ${isApproved ? 'bg-[#dff1e8] text-[#2a6d4f]' : 'bg-[#f3e7d2] text-[#7a5a2e]'}`}>
+          {isApproved ? '通过' : '需优化'}
+        </span>
+        {iterations > 1 && (
+          <span className="text-xs text-[#6b6256]">第{iterations}轮</span>
         )}
+      </div>
+      {review.summary && (
+        <div className="text-xs text-[#6b6256] mt-1 line-clamp-2">{review.summary}</div>
+      )}
+    </div>
+  );
+}
 
-        <div className="mt-3 pt-3 border-t">
-          <p className="text-sm text-gray-600">{reviewData.summary}</p>
-          {reviewData.suggestions && reviewData.suggestions.length > 0 && (
-            <div className="mt-2">
-              <p className="text-xs text-gray-500 mb-1">改进建议：</p>
-              <ul className="text-xs text-gray-600 space-y-1">
-                {reviewData.suggestions.slice(0, 3).map((s, i) => (
-                  <li key={i}>• {s}</li>
-                ))}
-              </ul>
-            </div>
-          )}
+function downloadPhoto(photo: Photo) {
+  const a = document.createElement('a');
+  a.href = photo.url;
+  a.download = `formal_${photo.type}_${Date.now()}.jpg`;
+  a.click();
+}
+
+function PhotoLightbox({
+  photo,
+  onClose,
+}: {
+  photo: Photo | null;
+  onClose: () => void;
+}) {
+  if (!photo?.url) return null;
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-black/70" onClick={onClose} />
+      <div className="relative z-10 mx-auto flex min-h-full w-full max-w-5xl items-center justify-center p-4">
+        <div className="w-full overflow-hidden rounded-2xl border border-white/10 bg-white shadow-2xl">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#efe8dd] bg-[#fbf8f2] p-3">
+            <button onClick={onClose} className="btn-ghost">
+              返回
+            </button>
+            <div className="text-sm font-medium text-[#2c2620]">{photo.type}</div>
+            <button onClick={() => downloadPhoto(photo)} className="btn-primary">
+              下载
+            </button>
+          </div>
+          <div className="bg-[#f2ede5]">
+            <img
+              src={photo.url}
+              alt={photo.type}
+              className="max-h-[80vh] w-full object-contain"
+            />
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function UploadStep({ onNext }: { onNext: (image: string) => void }) {
+// 邀请码步骤
+function InviteStep({ onEnter }: { onEnter: () => void }) {
+  const [code, setCode] = useState('');
+  const [error, setError] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!code.trim()) { 
+      setError('请输入邀请码'); 
+      return; 
+    }
+    localStorage.setItem('invite_code', code.toUpperCase());
+    onEnter();
+  };
+
+  return (
+    <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+      <div className="panel p-8 md:p-10">
+        <div className="tag">Invitation Only</div>
+        <h1 className="hero-title mt-4">专业形象照工作台</h1>
+        <p className="hero-subtitle mt-3">
+          从审核到生成，再到多轮质检，全流程自动化的专业人像方案。
+        </p>
+        <div className="mt-8 grid gap-4 text-sm text-[#6b6256] md:grid-cols-2">
+          <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+            <div className="text-[#1f1b17] font-semibold">身份一致性</div>
+            <p className="mt-2">多维度验证人脸特征，确保同一人像输出。</p>
+          </div>
+          <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+            <div className="text-[#1f1b17] font-semibold">专业布光</div>
+            <p className="mt-2">标准化摄影棚光效，统一质感与背景。</p>
+          </div>
+          <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+            <div className="text-[#1f1b17] font-semibold">多姿势并行</div>
+            <p className="mt-2">每个姿势独立优化，完成即展示。</p>
+          </div>
+          <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+            <div className="text-[#1f1b17] font-semibold">安全链路</div>
+            <p className="mt-2">敏感信息仅在后端处理，前端不保留。</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel-strong p-8 md:p-10">
+        <h2 className="text-xl font-semibold text-[#1f1b17]">输入邀请码</h2>
+        <p className="mt-2 text-sm text-[#6b6256]">输入可用邀请码以启动流程。</p>
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wide text-[#8a8173] mb-2">邀请码</label>
+            <input
+              type="text"
+              value={code}
+              onChange={(e) => { setCode(e.target.value.toUpperCase()); setError(''); }}
+              placeholder="如：VIP001"
+              className="input"
+            />
+            {error && <p className="mt-2 text-sm text-[#b05c3c]">{error}</p>}
+          </div>
+          <button type="submit" className="btn-primary w-full">
+            开始进入
+          </button>
+          <p className="text-xs text-[#9a8f81]">
+            访问即表示同意平台的隐私与数据处理条款。
+          </p>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// 使用协议步骤
+function ConsentStep({ onAgree }: { onAgree: () => void }) {
+  const [checked, setChecked] = useState(false);
+
+  return (
+    <div className="panel-strong mx-auto max-w-2xl p-8 md:p-10">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold text-[#1f1b17]">使用协议</h2>
+          <p className="mt-2 text-sm text-[#6b6256]">请确认以下条款后继续。</p>
+        </div>
+        <div className="tag">Step 1/4</div>
+      </div>
+      <div className="mt-6 grid gap-4 md:grid-cols-2">
+        <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+          <div className="font-semibold text-[#1f1b17]">用途限制</div>
+          <p className="mt-2 text-sm text-[#6b6256]">上传照片仅用于本次 AI 处理与生成。</p>
+        </div>
+        <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+          <div className="font-semibold text-[#1f1b17]">数据留存</div>
+          <p className="mt-2 text-sm text-[#6b6256]">处理完成后 24 小时内自动删除。</p>
+        </div>
+        <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+          <div className="font-semibold text-[#1f1b17]">隐私保护</div>
+          <p className="mt-2 text-sm text-[#6b6256]">不会用于其他目的或对外分享。</p>
+        </div>
+        <div className="rounded-xl border border-[#e7e1d8] bg-white/85 p-4">
+          <div className="font-semibold text-[#1f1b17]">安全链路</div>
+          <p className="mt-2 text-sm text-[#6b6256]">敏感信息仅在后端处理。</p>
+        </div>
+      </div>
+      <label className="mt-6 flex items-start gap-3 rounded-xl border border-[#e7e1d8] bg-white/85 p-4 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => setChecked(e.target.checked)}
+          className="mt-1 h-5 w-5 rounded border-[#d6c9b8] text-[#0e402e]"
+        />
+        <span className="text-sm text-[#4a433a]">我已阅读并同意上述协议</span>
+      </label>
+      <button
+        onClick={onAgree}
+        disabled={!checked}
+        className="btn-primary mt-6 w-full disabled:cursor-not-allowed disabled:bg-slate-300"
+      >
+        同意并继续
+      </button>
+    </div>
+  );
+}
+
+// 上传步骤
+function UploadStep({ onNext }: { onNext: (image: string) => Promise<void> }) {
   const [preview, setPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -174,422 +241,569 @@ function UploadStep({ onNext }: { onNext: (image: string) => void }) {
     }
 
     const reader = new FileReader();
-    reader.onload = (e) => {
-      setPreview(e.target?.result as string);
+    reader.onload = async (e) => {
+      const imageData = e.target?.result as string;
+      setPreview(imageData);
       setLoading(true);
-      setTimeout(() => {
+      try {
+        setOriginalImage(imageData);
+        await onNext(imageData);
+      } catch (err: any) {
+        setError(err?.message || '照片审核失败');
+      } finally {
         setLoading(false);
-        onNext(e.target?.result as string);
-      }, 800);
+      }
     };
     reader.readAsDataURL(file);
   }, [onNext]);
 
   return (
-    <div className="max-w-xl mx-auto">
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">上传照片</h2>
+    <div className="panel-strong mx-auto max-w-3xl p-8 md:p-10">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold text-[#1f1b17]">上传照片</h2>
+          <p className="mt-2 text-sm text-[#6b6256]">请上传清晰正脸照片，系统将先进行审核。</p>
+        </div>
+        <div className="tag">Step 2/4</div>
+      </div>
       {!preview ? (
-        <div className="border-2 border-dashed border-gray-300 rounded-xl p-12 text-center hover:border-blue-500 transition-colors">
+        <div className="mt-6 rounded-2xl border-2 border-dashed border-[#e2dacd] bg-white/75 p-12 text-center transition hover:border-[#bda982]">
           <input type="file" accept="image/*" onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} className="hidden" id="file-upload" />
-          <label htmlFor="file-upload" className="cursor-pointer">
+          <label htmlFor="file-upload" className="cursor-pointer block">
             <div className="mb-4">
               <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
               </svg>
             </div>
-            <p className="text-gray-600 mb-2">点击或拖拽上传照片</p>
-            <p className="text-sm text-gray-400">支持 JPG、PNG，最大10MB</p>
+            <p className="text-[#4a433a] font-medium mb-2">点击或拖拽上传照片</p>
+            <p className="text-sm text-[#9a8f81]">支持 JPG、PNG，最大 10MB</p>
           </label>
         </div>
       ) : loading ? (
-        <div className="text-center py-12">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-gray-600">正在检测人脸...</p>
+        <div className="mt-6 text-center py-12">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#0e402e] mx-auto mb-4"></div>
+          <p className="text-[#6b6256]">正在审核照片...</p>
         </div>
       ) : (
-        <div className="text-center">
-          <img src={preview} alt="预览" className="max-w-sm mx-auto rounded-lg shadow-lg mb-4" />
-          <p className="text-green-600 font-medium">✓ 照片已就绪</p>
+        <div className="mt-6 grid gap-6 md:grid-cols-[1.2fr_0.8fr] items-center">
+          <img src={preview} alt="预览" className="w-full rounded-2xl shadow-xl" />
+          <div className="rounded-2xl border border-[#e7e1d8] bg-white/85 p-5">
+            <div className="text-sm font-semibold text-[#1f1b17]">照片已就绪</div>
+            <p className="mt-2 text-sm text-[#6b6256]">请继续选择需要生成的姿势。</p>
+          </div>
         </div>
       )}
-      {error && <div className="mt-4 p-3 bg-red-50 text-red-600 rounded-lg text-sm">{error}</div>}
+      {error && <div className="mt-4 rounded-xl border border-[#e8c7b5] bg-[#fbeee6] px-4 py-3 text-sm text-[#b05c3c]">{error}</div>}
     </div>
   );
 }
 
-function ProcessingStep({ image, onComplete }: { image: string; onComplete: (photos: Photo[]) => void }) {
-  const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState('准备中...');
-  const [error, setError] = useState<string | null>(null);
-  const [retryCount, setRetryCount] = useState(0);
-  const [totalRetries, setTotalRetries] = useState(0);
-  const [currentReview, setCurrentReview] = useState<ReviewResult | null>(null);
-  const [currentStage, setCurrentStage] = useState('准备中');
-  const [auditSteps, setAuditSteps] = useState<AuditStep[]>([
-    { name: '人脸检测', score: null, passed: false, experts: [] },
-    { name: '人物分析', score: null, passed: false, experts: [] },
-    { name: '形象设计', score: null, passed: false, experts: [] },
-    { name: 'Prompt构建', score: null, passed: false, experts: [] },
-    { name: '方案评审', score: null, passed: false, experts: [] },
-    { name: '照片生成', score: null, passed: false, experts: [] },
-    { name: '最终审核', score: null, passed: false, experts: [] },
-  ]);
-  const { photos, setPhotos } = useWorkflowStore();
+// 姿势选择步骤
+function PoseSelectStep({ onNext }: { onNext: (selectedPoses: string[]) => void }) {
+  const [selected, setSelected] = useState<string[]>(PHOTO_TYPES.map(p => p.id));
 
-  const updateAuditStep = (index: number, score: number, experts: { expert: string; score: number }[]) => {
-    setAuditSteps(prev => {
-      const newSteps = [...prev];
-      newSteps[index] = {
-        ...newSteps[index],
-        score,
-        passed: score >= MIN_CONSENSUS,
-        experts,
-      };
-      return newSteps;
-    });
-  };
-
-  const processingSteps = [
-    { name: '人脸检测', action: 'detect', weight: 0.05, auditIndex: 0 },
-    { name: '人物分析', action: 'analyze', weight: 0.2, auditIndex: 1 },
-    { name: '形象设计', action: 'design', weight: 0.35, auditIndex: 2 },
-    { name: 'Prompt构建', action: 'buildPrompt', weight: 0.5, auditIndex: 3 },
-    { name: '方案评审', action: 'reviewPrompt', weight: 0.6, auditIndex: 4 },
-    { name: '照片生成', action: 'generate', weight: 0.8, auditIndex: 5 },
-    { name: '最终审核', action: 'finalCheck', weight: 1.0, auditIndex: 6 },
-  ];
-
-  useEffect(() => {
-    let mounted = true;
-    const runProcessing = async () => {
-      try {
-        let person: Person | null = null;
-        let designResult: Design | null = null;
-        let prompt: Prompt | null = null;
-        const generatedPhotos: Photo[] = [];
-
-        for (let i = 0; i < processingSteps.length; i++) {
-          if (!mounted) return;
-          const step = processingSteps[i];
-          setCurrentStage(step.name);
-          setProgress((step.weight - 0.1) * 100);
-
-          switch (step.action) {
-            case 'detect':
-              await new Promise(r => setTimeout(r, 500));
-              updateAuditStep(step.auditIndex, 100, [{ expert: 'SYSTEM', score: 100 }]);
-              break;
-
-            case 'analyze':
-              person = await analyze(image);
-              updateAuditStep(step.auditIndex, 100, [{ expert: 'SYSTEM', score: 100 }]);
-              break;
-
-            case 'design':
-              if (!person) throw new Error('缺少人物分析结果');
-              designResult = await design(person);
-              updateAuditStep(step.auditIndex, 100, [{ expert: 'SYSTEM', score: 100 }]);
-              break;
-
-            case 'buildPrompt':
-              if (!person || !designResult) throw new Error('缺少设计方案');
-              prompt = await buildPrompt(person, designResult);
-              updateAuditStep(step.auditIndex, 100, [{ expert: 'SYSTEM', score: 100 }]);
-              break;
-
-            case 'reviewPrompt':
-              if (!prompt) throw new Error('缺少Prompt');
-              const promptReview = await review(JSON.stringify(prompt));
-              setCurrentReview(promptReview);
-              setCurrentStage('方案评审');
-              updateAuditStep(step.auditIndex, promptReview.consensusScore, promptReview.reviews.map(r => ({ expert: r.expert, score: r.score })));
-
-              if (!promptReview.approved && totalRetries >= MAX_RETRY_COUNT - 1) {
-                setError(`方案评审未通过 (${promptReview.consensusScore}分)，已达到最大重试次数`);
-                return;
-              }
-
-              if (!promptReview.approved) {
-                setRetryCount(c => c + 1);
-                setTotalRetries(t => t + 1);
-                i = 1;
-                continue;
-              }
-              setRetryCount(0);
-              break;
-
-            case 'generate':
-              if (!prompt) throw new Error('缺少Prompt');
-              const types = ['正面头像', '侧面头像', '肖像照', '半身照', '全身照'];
-              for (let j = 0; j < types.length; j++) {
-                if (!mounted) return;
-                setStatus(`生成照片 ${j + 1}/5`);
-                const url = await generate(prompt, types[j]);
-                generatedPhotos.push({
-                  id: `${types[j]}-${Date.now()}-${j}`,
-                  type: types[j],
-                  url,
-                  approved: true,
-                  review: { reviews: [], consensusScore: 100, approved: true, summary: '生成成功', suggestions: [] },
-                });
-              }
-              updateAuditStep(step.auditIndex, 100, [{ expert: 'SYSTEM', score: 100 }]);
-              setPhotos(generatedPhotos);
-              break;
-
-            case 'finalCheck':
-              if (!person || !prompt) throw new Error('缺少必要数据');
-              const finalReview = await finalCheck(image, person, prompt);
-              setCurrentReview(finalReview);
-              setCurrentStage('最终审核');
-              updateAuditStep(step.auditIndex, finalReview.consensusScore, finalReview.reviews.map(r => ({ expert: r.expert, score: r.score })));
-
-              if (!finalReview.approved || (finalReview.passRate ?? 0) < 80) {
-                if (totalRetries >= MAX_RETRY_COUNT - 1) {
-                  setError(`照片质量未达标 (${finalReview.consensusScore}分)，已达到最大重试次数`);
-                  return;
-                }
-                setRetryCount(c => c + 1);
-                setTotalRetries(t => t + 1);
-                i = 3;
-                continue;
-              }
-              break;
-          }
-          setProgress(step.weight * 100);
-        }
-
-        if (mounted && generatedPhotos.length > 0) {
-          onComplete(generatedPhotos);
-        }
-      } catch (e: any) {
-        if (mounted) {
-          setError(e.message || '处理失败');
-        }
-      }
-    };
-    runProcessing();
-    return () => { mounted = false; };
-  }, [image, onComplete, setPhotos, totalRetries]);
-
-  if (error) {
-    return (
-      <div className="max-w-lg mx-auto">
-        <div className="bg-red-50 border border-red-200 rounded-lg p-6 mb-6">
-          <div className="flex items-center gap-3 mb-4">
-            <span className="text-3xl">⚠️</span>
-            <div>
-              <h3 className="font-semibold text-red-700">处理未通过</h3>
-              <p className="text-sm text-red-600">{error}</p>
-            </div>
-          </div>
-          <div className="flex justify-between text-sm">
-            <span className="text-red-500">当前重试: {retryCount}/{MAX_RETRY_COUNT}</span>
-            <span className="text-red-500">总计重试: {totalRetries}</span>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-100">
-          <h4 className="font-semibold text-gray-800 mb-4">质量审核历史</h4>
-          <AuditTrail steps={auditSteps} />
-        </div>
-      </div>
+  const togglePose = (poseId: string) => {
+    setSelected(prev => 
+      prev.includes(poseId) 
+        ? prev.filter(p => p !== poseId)
+        : [...prev, poseId]
     );
-  }
+  };
 
-  return (
-    <div className="max-w-lg mx-auto">
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">AI 正在处理</h2>
-
-      <div className="mb-6">
-        <div className="flex justify-between text-sm mb-2">
-          <span className="text-gray-600">{currentStage}</span>
-          <span className="text-gray-900 font-medium">{Math.round(progress)}%</span>
-        </div>
-        <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
-          <div className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
-        </div>
-      </div>
-
-      <div className="mb-6">
-        <div className="flex justify-between text-xs text-gray-500 mb-2">
-          <span>进度: {retryCount > 0 ? `重试第${retryCount}次` : '首次处理'}</span>
-          <span>审核通过: {auditSteps.filter(s => s.passed).length}/{auditSteps.length}</span>
-        </div>
-      </div>
-
-      <div className="space-y-2 mb-6">
-        {processingSteps.map((step, i) => {
-          const stepProgress = step.weight * 100;
-          const isComplete = progress >= stepProgress;
-          const isCurrent = progress >= (step.weight - 0.1) * 100 && progress < stepProgress;
-          const auditData = auditSteps[step.auditIndex];
-
-          return (
-            <div key={step.action} className={`flex items-center gap-3 p-3 rounded-lg transition-all ${isCurrent ? 'bg-blue-50' : isComplete ? 'bg-green-50' : 'bg-gray-50'
-              }`}>
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${isComplete ? 'bg-green-500 text-white' : isCurrent ? 'bg-blue-500 text-white animate-pulse' : 'bg-gray-300 text-gray-500'
-                }`}>
-                {isComplete ? '✓' : isCurrent ? '⟳' : i + 1}
-              </div>
-              <span className={`flex-1 text-sm ${isCurrent ? 'text-gray-900 font-medium' : isComplete ? 'text-gray-900' : 'text-gray-400'}`}>
-                {step.name}
-              </span>
-              {auditData.score !== null && (
-                <span className={`text-xs font-medium ${auditData.passed ? 'text-green-600' : 'text-yellow-600'}`}>
-                  {auditData.score}分
-                </span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {currentReview && (
-        <ReviewPanel review={currentReview} stage={currentStage} />
-      )}
-    </div>
-  );
-}
-
-function ResultStep({ photos, onReset }: { photos: Photo[]; onReset: () => void }) {
-  const downloadPhoto = (photo: Photo) => {
-    const a = document.createElement('a');
-    a.href = photo.url;
-    a.download = `formal_${photo.type}_${Date.now()}.jpg`;
-    a.click();
+  const handleSubmit = () => {
+    if (selected.length === 0) {
+      alert('请至少选择一种姿势');
+      return;
+    }
+    onNext(selected);
   };
 
   return (
-    <div className="max-w-5xl mx-auto">
-      <div className="text-center mb-8">
-        <h2 className="text-3xl font-bold text-gray-900 mb-2">专业形象照已完成</h2>
-        <p className="text-gray-500">共生成 {photos.length} 张照片</p>
+    <div className="panel-strong mx-auto max-w-4xl p-8 md:p-10">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold text-[#1f1b17]">选择姿势</h2>
+          <p className="mt-2 text-sm text-[#6b6256]">请选择需要生成的照片姿势（可多选）。</p>
+        </div>
+        <div className="tag">Step 3/4</div>
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
-        {photos.map((photo) => (
-          <div key={photo.id} className="bg-white rounded-lg overflow-hidden shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
-            <img src={photo.url} alt={photo.type} className="w-full aspect-square object-cover" />
-            <div className="p-3">
-              <p className="text-sm font-medium text-gray-800 mb-2">{photo.type}</p>
-              <button onClick={() => downloadPhoto(photo)} className="w-full py-2 bg-blue-600 text-white text-sm rounded font-medium hover:bg-blue-700 transition-colors">
-                下载
-              </button>
+      
+      <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+        {PHOTO_TYPES.map((pose) => (
+          <label 
+            key={pose.id}
+            className={`relative flex items-start gap-4 p-5 rounded-2xl border cursor-pointer transition-all ${
+              selected.includes(pose.id) 
+                ? 'border-[#0e402e] bg-[#0e402e] text-white'
+                : 'border-[#e7e1d8] bg-white hover:border-[#d6c9b8]'
+            }`}
+          >
+            <input 
+              type="checkbox"
+              checked={selected.includes(pose.id)}
+              onChange={() => togglePose(pose.id)}
+              className="mt-1 w-5 h-5 rounded border-[#d6c9b8] text-[#0e402e]"
+            />
+            <div className="flex-1">
+              <div className={`font-semibold ${selected.includes(pose.id) ? 'text-white' : 'text-[#1f1b17]'}`}>{pose.label}</div>
+              <div className={`text-sm ${selected.includes(pose.id) ? 'text-[#efe8dd]' : 'text-[#6b6256]'}`}>{pose.desc}</div>
             </div>
-          </div>
+            {selected.includes(pose.id) && (
+              <div className="absolute top-3 right-3 text-white">
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                </svg>
+              </div>
+            )}
+          </label>
         ))}
       </div>
-      <div className="text-center">
-        <button onClick={onReset} className="text-blue-600 hover:text-blue-700 font-medium transition-colors">
-          重新开始
+
+      <div className="mt-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="text-sm text-[#6b6256]">
+          已选择 {selected.length} 种姿势
+        </div>
+        <button 
+          onClick={handleSubmit}
+          disabled={selected.length === 0}
+          className="btn-primary disabled:cursor-not-allowed disabled:bg-slate-300"
+        >
+          开始生成
         </button>
       </div>
     </div>
   );
 }
 
-export function InviteStep({ onEnter }: { onEnter: () => void }) {
-  const [code, setCode] = useState('');
-  const [error, setError] = useState('');
-  const { setStep } = useWorkflowStore();
+// 复杂处理步骤 - 每个姿势独立评审迭代
+function ProcessingStep({ 
+  image, 
+  selectedPoses,
+  onPhotoComplete 
+}: { 
+  image: string; 
+  selectedPoses: string[];
+  onPhotoComplete: (photo: Photo) => void;
+}) {
+  const [person, setPerson] = useState<Person | null>(null);
+  const [poseStates, setPoseStates] = useState<Map<string, PoseState>>(new Map());
+  const [isAnalyzing, setIsAnalyzing] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [lightboxPhoto, setLightboxPhoto] = useState<Photo | null>(null);
+  const abortController = useRef<AbortController | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!code.trim()) { setError('请输入邀请码'); return; }
-    localStorage.setItem('invite_code', code.toUpperCase());
-    onEnter();
+  // 初始化姿势状态
+  useEffect(() => {
+    const initialStates = new Map<string, PoseState>();
+    selectedPoses.forEach(type => {
+      initialStates.set(type, {
+        type,
+        status: 'pending',
+        progress: 0,
+        step: 0,
+        promptIteration: 0,
+        generationIteration: 0,
+        steps: [
+          { name: '构建Prompt', status: 'pending' },
+          { name: '评审Prompt', status: 'pending' },
+          { name: '生成图像', status: 'pending' },
+          { name: '评审结果', status: 'pending' },
+        ]
+      });
+    });
+    setPoseStates(initialStates);
+  }, [selectedPoses]);
+
+  // 分析人脸（共享步骤）
+  useEffect(() => {
+    abortController.current = new AbortController();
+    const signal = abortController.current.signal;
+
+    const runAnalysis = async () => {
+      try {
+        setIsAnalyzing(true);
+        const personData = await analyze(image);
+        if (signal.aborted) return;
+        setPerson(personData);
+        setIsAnalyzing(false);
+        
+        // 人脸分析完成后，开始并行处理每个姿势
+        selectedPoses.forEach(type => {
+          runPose(type, personData);
+        });
+      } catch (e: any) {
+        setError(e.message);
+        setIsAnalyzing(false);
+      }
+    };
+
+    runAnalysis();
+
+    return () => {
+      abortController.current?.abort();
+    };
+  }, [image, selectedPoses]);
+
+  // 处理单个姿势的完整流程
+  const runPose = async (poseType: string, personData: Person) => {
+    try {
+      updatePoseState(poseType, { 
+        status: 'generating',
+        progress: 60,
+        steps: updateSteps(poseType, 2, 'active')
+      });
+
+      const result = await processPose(image, poseType, personData);
+
+      const generatedPhoto: Photo = {
+        id: `${poseType}-${Date.now()}`,
+        type: poseType,
+        url: result.image,
+        approved: result.review.approved ?? (result.review.overallScore || 0) >= 70,
+        review: { ...result.review, iteration: result.generationIterations },
+      };
+
+      updatePoseState(poseType, { 
+        status: 'completed', 
+        progress: 100,
+        promptIteration: result.promptIterations,
+        generationIteration: result.generationIterations,
+        currentReview: generatedPhoto.review,
+        photo: generatedPhoto,
+        steps: updateSteps(poseType, 3, 'completed')
+      });
+
+      onPhotoComplete(generatedPhoto);
+    } catch (e: any) {
+      updatePoseState(poseType, { 
+        status: 'error', 
+        error: e.message,
+      });
+    }
   };
 
-  const demoCodes = [{ code: 'PHOTO2026', label: 'Alpha', desc: '全功能' }, { code: 'VIP001', label: 'VIP', desc: '高清' }, { code: 'EARLY2026', label: '早鸟', desc: '标准' }];
+  // 更新姿势状态
+  const updatePoseState = (type: string, updates: Partial<PoseState>) => {
+    setPoseStates(prev => {
+      const newStates = new Map(prev);
+      const current = newStates.get(type);
+      if (current) {
+        newStates.set(type, { ...current, ...updates });
+      }
+      return newStates;
+    });
+  };
+
+  // 更新步骤状态
+  const updateSteps = (type: string, activeIndex: number, status: 'active' | 'completed' | 'error'): ProcessingStep[] => {
+    const state = poseStates.get(type);
+    if (!state) return [];
+    
+    return state.steps.map((step, index) => ({
+      ...step,
+      status: index < activeIndex ? 'completed' : 
+              index === activeIndex ? status : 
+              'pending'
+    }));
+  };
+
+  // 获取状态显示
+  const getStatusDisplay = (state: PoseState) => {
+    const statusMap: Record<string, { text: string; color: string; bg: string }> = {
+      pending: { text: '等待中', color: 'text-[#8c7f70]', bg: 'bg-[#d8cbb7]' },
+      generating: { text: '生成与评审中', color: 'text-[#7a5a2e]', bg: 'bg-[#cbb89a]' },
+      completed: { text: '✓ 已完成', color: 'text-[#2a6d4f]', bg: 'bg-[#2a6d4f]' },
+      error: { text: '✗ 失败', color: 'text-[#b05c3c]', bg: 'bg-[#b05c3c]' },
+    };
+    return statusMap[state.status] || statusMap.pending;
+  };
+
+  if (isAnalyzing) {
+    return (
+      <div className="panel-strong mx-auto max-w-2xl p-10 text-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#0e402e] mx-auto mb-4"></div>
+        <h2 className="text-xl font-semibold text-[#1f1b17] mb-2">AI 正在分析</h2>
+        <p className="text-sm text-[#6b6256]">分析人脸特征中，请稍候...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="panel-strong mx-auto max-w-2xl p-8">
+        <div className="rounded-xl border border-[#e8c7b5] bg-[#fbeee6] p-6">
+          <h3 className="font-semibold text-[#b05c3c] mb-2">处理出错</h3>
+          <p className="text-[#b05c3c]">{error}</p>
+          <button onClick={() => window.location.reload()} className="btn-ghost mt-4 w-full">
+            重试
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="max-w-md mx-auto">
-      <div className="text-center mb-8">
-        <h1 className="text-3xl font-bold text-gray-900 mb-2">专业形象照</h1>
-        <p className="text-gray-500">AI驱动的专业人像生成</p>
-      </div>
-      <form onSubmit={handleSubmit} className="space-y-4">
+    <div className="panel-strong mx-auto max-w-6xl p-8 md:p-10">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">邀请码</label>
-          <input type="text" value={code} onChange={(e) => { setCode(e.target.value.toUpperCase()); setError(''); }} placeholder="输入邀请码" className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" autoComplete="off" />
-          {error && <p className="text-red-500 text-sm mt-1">{error}</p>}
+          <h2 className="text-2xl font-semibold text-[#1f1b17]">AI 正在生成</h2>
+          <p className="text-sm text-[#6b6256]">每个姿势独立评审和迭代优化。</p>
         </div>
-        <button type="submit" className="w-full py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">开始使用</button>
-      </form>
-      <div className="mt-8 pt-6 border-t border-gray-200">
-        <p className="text-sm text-gray-500 text-center mb-4">演示邀请码</p>
-        <div className="grid grid-cols-3 gap-2">
-          {demoCodes.map((d) => (
-            <button key={d.code} onClick={() => setCode(d.code)} className={`p-3 rounded-lg text-center ${code === d.code ? 'bg-blue-50 border-2 border-blue-500' : 'bg-gray-50 border-2 border-transparent'}`}>
-              <div className="font-mono text-sm font-medium">{d.code}</div>
-              <div className="text-xs text-gray-500 mt-1">{d.desc}</div>
-            </button>
-          ))}
-        </div>
+        <div className="tag">Step 4/4</div>
       </div>
+      
+      {/* 人物分析结果 */}
+      {person && (
+        <div className="mt-6 rounded-2xl border border-[#e7e1d8] bg-white/85 p-4">
+          <h4 className="font-medium text-[#1f1b17] mb-2">人脸分析完成</h4>
+          <p className="text-sm text-[#6b6256]">
+            {person.race} {person.gender}, {person.age} · {person.faceShape}脸型
+          </p>
+        </div>
+      )}
+
+      {/* 并行处理的姿势列表 */}
+      <div className="mt-6 space-y-4">
+        {Array.from(poseStates.values()).map((state) => {
+          const status = getStatusDisplay(state);
+          return (
+            <div key={state.type} className="rounded-2xl border border-[#e7e1d8] bg-white/90 p-5 shadow-sm">
+              {/* 头部信息 */}
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-3">
+                  <div className={`w-3 h-3 rounded-full ${status.bg} ${state.status === 'generating' ? 'animate-pulse' : ''}`} />
+                  <span className="font-medium text-[#1f1b17]">{state.type}</span>
+                </div>
+                <span className={`text-sm font-medium ${status.color}`}>{status.text}</span>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-[220px_1fr]">
+                <div>
+                  <div className="aspect-square overflow-hidden rounded-xl border border-[#e7e1d8] bg-[#f2ede5]">
+                    {state.photo?.url ? (
+                      <img src={state.photo.url} alt={state.type} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0e402e]" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => state.photo && setLightboxPhoto(state.photo)}
+                      className="btn-ghost flex-1"
+                      disabled={!state.photo?.url}
+                    >
+                      放大
+                    </button>
+                    <button
+                      onClick={() => state.photo && downloadPhoto(state.photo)}
+                      className="btn-primary flex-1"
+                      disabled={!state.photo?.url}
+                    >
+                      下载
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  {/* 进度条 */}
+                  <div className="h-2 bg-[#efe8dd] rounded-full overflow-hidden mb-3">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${status.bg}`}
+                      style={{ width: `${state.progress}%` }}
+                    />
+                  </div>
+
+                  {/* 处理步骤时间轴 */}
+                  <div className="timeline mb-3">
+                    {state.steps.map((step, idx) => (
+                      <div key={idx} className="timeline-item">
+                        {idx !== state.steps.length - 1 && <div className="timeline-line" />}
+                        <div className={`timeline-dot ${step.status}`} />
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-medium text-[#2c2620]">{step.name}</div>
+                          <span className="status-pill">
+                            {step.status === 'completed' && '完成'}
+                            {step.status === 'active' && '进行中'}
+                            {step.status === 'error' && '待优化'}
+                            {step.status === 'pending' && '等待'}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* 评审结果 */}
+                  {state.currentReview && (
+                    <div className="border-t pt-3">
+                      <ReviewPanel review={state.currentReview} />
+                    </div>
+                  )}
+
+                  {/* 错误信息 */}
+                  {state.error && (
+                    <div className="mt-2 text-sm text-rose-600">
+                      错误: {state.error}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <PhotoLightbox photo={lightboxPhoto} onClose={() => setLightboxPhoto(null)} />
     </div>
   );
 }
 
-export function ConsentStep({ onAgree }: { onAgree: () => void }) {
-  const [checked, setChecked] = useState(false);
-  const { setStep } = useWorkflowStore();
+// 结果步骤
+function ResultStep({ photos, onReset }: { photos: Photo[]; onReset: () => void }) {
+  const completedCount = photos.filter(p => p.url).length;
+  const [lightboxPhoto, setLightboxPhoto] = useState<Photo | null>(null);
 
   return (
-    <div className="max-w-lg mx-auto">
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">使用协议</h2>
-      <div className="bg-gray-50 rounded-lg p-6 mb-6">
-        <ul className="space-y-3 text-gray-600">
-          <li className="flex items-start gap-2"><span className="text-green-500">✓</span> 上传照片仅用于本次AI处理</li>
-          <li className="flex items-start gap-2"><span className="text-green-500">✓</span> 处理完成后24小时内自动删除所有数据</li>
-          <li className="flex items-start gap-2"><span className="text-green-500">✓</span> 不会将照片用于其他目的或分享给第三方</li>
-        </ul>
+    <div className="panel-strong mx-auto max-w-6xl p-8 md:p-10">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-8">
+        <div>
+          <h2 className="text-3xl font-semibold text-[#1f1b17] mb-1">专业形象照</h2>
+          <p className="text-sm text-[#6b6256]">
+          已完成 {completedCount} 张照片
+          {completedCount < photos.length && `（${photos.length - completedCount} 张生成中...）`}
+          </p>
+        </div>
+        <button onClick={onReset} className="btn-ghost">重新开始</button>
       </div>
-      <label className="flex items-start gap-3 mb-6 cursor-pointer">
-        <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} className="mt-1 w-5 h-5 text-blue-600 rounded" />
-        <span className="text-gray-700">我已阅读并同意上述协议</span>
-      </label>
-      <button onClick={onAgree} disabled={!checked} className="w-full py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:bg-gray-300">
-        同意并继续
-      </button>
+      
+      <div className="grid gap-4 md:grid-cols-2 mb-8">
+        {photos.map((photo) => (
+          <div key={photo.id} className="rounded-2xl border border-[#e7e1d8] bg-white shadow-sm">
+            <div className="grid gap-4 p-4 md:grid-cols-[220px_1fr]">
+              <div>
+                <div className="aspect-square overflow-hidden rounded-xl border border-[#e7e1d8] bg-[#f2ede5]">
+                  {photo.url ? (
+                    <img
+                      src={photo.url}
+                      alt={photo.type}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#0e402e]" />
+                    </div>
+                  )}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    onClick={() => photo.url && setLightboxPhoto(photo)}
+                    className="btn-ghost flex-1"
+                    disabled={!photo.url}
+                  >
+                    放大
+                  </button>
+                  <button
+                    onClick={() => photo.url && downloadPhoto(photo)}
+                    className="btn-primary flex-1"
+                    disabled={!photo.url}
+                  >
+                    下载
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-base font-medium text-[#2c2620]">{photo.type}</div>
+                  <span className="text-xs rounded-full bg-[#dff1e8] px-2 py-1 text-[#2a6d4f]">
+                    已完成
+                  </span>
+                </div>
+                {photo.review ? (
+                  <ReviewPanel review={photo.review} title="评审结果" />
+                ) : (
+                  <div className="text-sm text-[#6b6256]">评审结果生成中...</div>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <PhotoLightbox photo={lightboxPhoto} onClose={() => setLightboxPhoto(null)} />
     </div>
   );
 }
 
+// Main App
 export default function App() {
   const { step, setStep, image, setImage, photos, setPhotos, reset } = useWorkflowStore();
   const [hasInvite, setHasInvite] = useState(false);
+  const [selectedPoses, setSelectedPoses] = useState<string[]>([]);
 
   useEffect(() => {
     const code = localStorage.getItem('invite_code');
     if (code) {
       setHasInvite(true);
       setStep('consent');
-    } else {
-      setHasInvite(false);
     }
   }, [setStep]);
 
   const resetApp = useCallback(() => {
     clearInviteCode();
     setHasInvite(false);
+    setSelectedPoses([]);
     reset();
   }, [reset]);
 
+  const handlePhotoComplete = (photo: Photo) => {
+    setPhotos((prev: Photo[]) => {
+      const exists = prev.find((p: Photo) => p.type === photo.type);
+      if (exists) {
+        return prev.map((p: Photo) => p.type === photo.type ? photo : p);
+      }
+      return [...prev, photo];
+    });
+  };
+
   return (
-    <div className="min-h-screen bg-gray-50 py-8 px-4">
+    <div className="page">
       {hasInvite && (
-        <header className="max-w-5xl mx-auto mb-8 flex justify-between items-center">
-          <h1 className="text-xl font-bold text-gray-900">专业形象照生成器</h1>
-          <button onClick={resetApp} className="text-gray-400 hover:text-gray-600 text-sm">重新开始</button>
+        <header className="shell mb-8 flex flex-col gap-4 rounded-2xl border border-white/70 bg-white/75 px-6 py-5 shadow-[0_24px_60px_rgba(20,20,20,0.10)] backdrop-blur md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="tag">Formal Photos</div>
+            <h1 className="mt-2 text-2xl font-semibold text-[#1f1b17]">专业形象照生成器</h1>
+            <p className="text-sm text-[#6b6256]">AI 驱动的专业人像生成与质检</p>
+          </div>
+          <button onClick={resetApp} className="btn-ghost">重新开始</button>
         </header>
       )}
-      <main className="max-w-5xl mx-auto">
+      <main className="shell">
         {!hasInvite && <InviteStep onEnter={() => { setHasInvite(true); setStep('consent'); }} />}
         {hasInvite && step === 'consent' && <ConsentStep onAgree={() => setStep('upload')} />}
-        {hasInvite && step === 'upload' && <UploadStep onNext={(img) => { setImage(img); setStep('processing'); }} />}
-        {hasInvite && step === 'processing' && image && <ProcessingStep image={image} onComplete={(p) => { setPhotos(p); setStep('result'); }} />}
-        {hasInvite && step === 'result' && photos.length > 0 && <ResultStep photos={photos} onReset={resetApp} />}
+        {hasInvite && step === 'upload' && (
+          <UploadStep onNext={async (img) => {
+            const review = await reviewInput(img);
+            const approved = review.approved ?? (review.overallScore || 0) >= 70;
+            if (!approved) {
+              throw new Error(review.summary || '照片审核未通过，请更换更清晰的照片');
+            }
+            setImage(img);
+            setStep('pose_select');
+          }} />
+        )}
+        {hasInvite && step === 'pose_select' && (
+          <PoseSelectStep onNext={(poses) => { setSelectedPoses(poses); setStep('processing'); }} />
+        )}
+        {hasInvite && step === 'processing' && image && (
+          <ProcessingStep 
+            image={image} 
+            selectedPoses={selectedPoses}
+            onPhotoComplete={handlePhotoComplete}
+          />
+        )}
+        {hasInvite && step === 'result' && photos.length > 0 && (
+          <ResultStep photos={photos} onReset={resetApp} />
+        )}
       </main>
     </div>
   );

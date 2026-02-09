@@ -10,13 +10,35 @@ export interface ExpertReview {
 }
 
 export interface ReviewResult {
-  reviews: ExpertReview[];
-  consensusScore: number;
-  approved: boolean;
-  summary: string;
+  // Legacy format
+  reviews?: ExpertReview[];
+  consensusScore?: number;
+  approved?: boolean;
+  summary?: string;
   suggestions?: string[];
   passRate?: number;
   lockReason?: string;
+  // New comparison format
+  identityMatch?: {
+    score: number;
+    confidence: string;
+    verdict: string;
+  };
+  facialFeatures?: {
+    preservationScore: number;
+    matchingFeatures: string[];
+    differences: string[];
+  };
+  qualityAssessment?: {
+    professionalism: number;
+    beautification: number;
+    lighting: number;
+    pose: number;
+  };
+  overallScore?: number;
+  recommendations?: string[];
+  // Iteration tracking
+  iteration?: number;
 }
 
 export type Review = ReviewResult;

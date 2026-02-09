@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { Person, Design, Prompt, Photo, ReviewResult } from './types';
 
-export type WorkflowStep = 'consent' | 'upload' | 'processing' | 'result';
+export type WorkflowStep = 'consent' | 'upload' | 'pose_select' | 'processing' | 'result';
 
 interface WorkflowState {
     step: WorkflowStep;
@@ -22,7 +22,7 @@ interface WorkflowState {
     setDesign: (design: Design) => void;
     setPrompt: (prompt: Prompt) => void;
     addPhoto: (photo: Photo) => void;
-    setPhotos: (photos: Photo[]) => void;
+    setPhotos: (photos: Photo[] | ((prev: Photo[]) => Photo[])) => void;
     setCurrentAction: (action: string) => void;
     setProgress: (progress: number) => void;
     setError: (error: string | null) => void;
@@ -53,7 +53,9 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
     setDesign: (design) => set({ design }),
     setPrompt: (prompt) => set({ prompt }),
     addPhoto: (photo) => set((state) => ({ photos: [...state.photos, photo] })),
-    setPhotos: (photos) => set({ photos }),
+    setPhotos: (photos: Photo[] | ((prev: Photo[]) => Photo[])) => set((state) => ({
+        photos: typeof photos === 'function' ? photos(state.photos) : photos
+    })),
     setCurrentAction: (currentAction) => set({ currentAction }),
     setProgress: (progress) => set({ progress }),
     setError: (error) => set({ error }),

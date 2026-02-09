@@ -1,0 +1,6 @@
+# Local dev secrets for wrangler pages dev
+# Copy to .dev.vars and fill in real values. Do NOT commit .dev.vars.
+
+GEMINI_API_KEY=your_gemini_api_key_here
+INVITE_CODES=PHOTO2026,VIP001,EARLY2026
+# API_SECRET=optional_hmac_secret
