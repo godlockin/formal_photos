@@ -1,0 +1,2 @@
+# Local dev config for Pages proxy mode (avoids assets directory conflict)
+compatibility_date = "2024-04-01"

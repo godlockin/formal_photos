@@ -3,7 +3,7 @@
   "version": "3.0.0",
   "type": "module",
   "scripts": {
-    "dev": "wrangler pages dev --proxy 3000 -- npm run dev:frontend",
+    "dev": "wrangler pages dev --config wrangler.dev.toml --proxy 3000 -- npm run dev:frontend",
     "dev:frontend": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
@@ -54,8 +54,5 @@
     "typescript": "^5.3.3",
     "vite": "^7.3.1",
     "wrangler": "^4.63.0"
-  },
-  "optionalDependencies": {
-    "@rollup/rollup-linux-x64-gnu": "4.57.1"
   }
 }
