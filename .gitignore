@@ -36,3 +36,13 @@ pnpm-debug.log*
 
 sys_init
 .npm-cache
+
+# Test scripts and temporary files
+test_*.py
+test_*.sh
+DEPLOY_TROUBLESHOOTING.md
+FETCH_ERROR_ANALYSIS.md
+ASYNC_POLLING_GUIDE.md
+test_output.jpg
+output/
+*.log
