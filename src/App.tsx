@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { analyze, reviewInput, processPose, setOriginalImage, clearInviteCode } from './api';
+import { analyze, reviewInput, processPoseAsync, setOriginalImage, clearInviteCode, processFile, type JobStatus } from './api';
 import { useWorkflowStore } from './store';
 import type { Person, Photo, ReviewResult } from './types';
 
@@ -230,7 +230,7 @@ function UploadStep({ onNext }: { onNext: (image: string) => Promise<void> }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const handleFile = useCallback((file: File) => {
+  const handleFile = useCallback(async (file: File) => {
     if (!file.type.startsWith('image/')) {
       setError('请上传图片文件');
       return;
@@ -240,21 +240,17 @@ function UploadStep({ onNext }: { onNext: (image: string) => Promise<void> }) {
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const imageData = e.target?.result as string;
+    setLoading(true);
+    try {
+      // 压缩图片
+      const imageData = await processFile(file);
       setPreview(imageData);
-      setLoading(true);
-      try {
-        setOriginalImage(imageData);
-        await onNext(imageData);
-      } catch (err: any) {
-        setError(err?.message || '照片审核失败');
-      } finally {
-        setLoading(false);
-      }
-    };
-    reader.readAsDataURL(file);
+      setOriginalImage(imageData);
+      await onNext(imageData);
+    } catch (err: any) {
+      setError(err?.message || '照片处理失败');
+      setLoading(false);
+    }
   }, [onNext]);
 
   return (
@@ -444,16 +440,32 @@ function ProcessingStep({
     };
   }, [image, selectedPoses]);
 
-  // 处理单个姿势的完整流程
+  // 处理单个姿势的完整流程（异步轮询模式）
   const runPose = async (poseType: string, personData: Person) => {
     try {
-      updatePoseState(poseType, { 
+      updatePoseState(poseType, {
         status: 'generating',
-        progress: 60,
-        steps: updateSteps(poseType, 2, 'active')
+        progress: 30,
+        steps: updateSteps(poseType, 1, 'active')
       });
 
-      const result = await processPose(image, poseType, personData);
+      // 使用异步 API，带进度回调
+      const result = await processPoseAsync(
+        image,
+        poseType,
+        personData,
+        (status: JobStatus) => {
+          // 根据任务状态更新进度
+          const progress = status.status === 'pending' ? 30 :
+                          status.status === 'processing' ? 60 :
+                          status.status === 'completed' ? 100 : 30;
+          updatePoseState(poseType, {
+            status: status.status === 'completed' ? 'completed' :
+                    status.status === 'failed' ? 'error' : 'generating',
+            progress,
+          });
+        }
+      );
 
       const generatedPhoto: Photo = {
         id: `${poseType}-${Date.now()}`,
@@ -463,8 +475,8 @@ function ProcessingStep({
         review: { ...result.review, iteration: result.generationIterations },
       };
 
-      updatePoseState(poseType, { 
-        status: 'completed', 
+      updatePoseState(poseType, {
+        status: 'completed',
         progress: 100,
         promptIteration: result.promptIterations,
         generationIteration: result.generationIterations,
@@ -475,8 +487,8 @@ function ProcessingStep({
 
       onPhotoComplete(generatedPhoto);
     } catch (e: any) {
-      updatePoseState(poseType, { 
-        status: 'error', 
+      updatePoseState(poseType, {
+        status: 'error',
         error: e.message,
       });
     }

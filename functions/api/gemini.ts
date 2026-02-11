@@ -55,11 +55,68 @@ const DEFAULT_ENV: Partial<Env> = {
 };
 
 const ITERATION_LIMITS = {
-  MAX_PROMPT_ITERATIONS: 3,
-  MAX_GENERATION_ITERATIONS: 3,
+  MAX_PROMPT_ITERATIONS: 2,
+  MAX_GENERATION_ITERATIONS: 2,
 };
 
 const codeUsage = new Map<string, number>();
+
+// 任务存储 (使用全局内存存储，适合单实例；生产环境建议使用 KV 或 Durable Objects)
+interface Job {
+  id: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  action: string;
+  data: any;
+  result?: any;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+const jobs = new Map<string, Job>();
+
+// 生成任务ID
+function generateJobId(): string {
+  return `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// 创建任务
+function createJob(action: string, data: any): Job {
+  const job: Job = {
+    id: generateJobId(),
+    status: 'pending',
+    action,
+    data,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  jobs.set(job.id, job);
+  return job;
+}
+
+// 更新任务状态
+function updateJob(jobId: string, updates: Partial<Job>) {
+  const job = jobs.get(jobId);
+  if (job) {
+    Object.assign(job, updates, { updatedAt: Date.now() });
+    jobs.set(jobId, job);
+  }
+}
+
+// 获取任务
+function getJob(jobId: string): Job | undefined {
+  return jobs.get(jobId);
+}
+
+// 清理旧任务 (保留最近1小时的任务)
+function cleanupOldJobs() {
+  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  for (const [id, job] of jobs.entries()) {
+    if (job.createdAt < oneHourAgo) {
+      jobs.delete(id);
+    }
+  }
+}
 
 // --- Utils ---
 
@@ -483,52 +540,157 @@ async function generateImageFromPrompt(
   throw new Error('IMAGE_GENERATION_FAILED');
 }
 
+// 后台处理 processPose (用于异步任务)
+async function processPoseInBackground(
+  genAI: GoogleGenerativeAI,
+  analysisModels: string[],
+  generationModels: string[],
+  originalImage: string,
+  photoType: string,
+  providedPerson?: any
+): Promise<any> {
+  let person = providedPerson;
+  if (!person) {
+    const analyzePrompt = buildAnalyzePrompt();
+    const analyzeResponse = await generateContentWithFallback(genAI, analysisModels, [
+      { text: analyzePrompt },
+      { inlineData: { data: originalImage.split(',')[1] || originalImage, mimeType: 'image/jpeg' } }
+    ]);
+    person = JSON.parse(analyzeResponse.response.text().replace(/```json/g, '').replace(/```/g, '').trim());
+  }
+
+  const designPrompt = buildDesignPrompt(person, photoType);
+  const designResponse = await generateContentWithFallback(genAI, analysisModels, designPrompt);
+  const design = JSON.parse(designResponse.response.text().replace(/```json/g, '').replace(/```/g, '').trim());
+
+  let promptText = buildGenerationPrompt(person, design, photoType, originalImage);
+  let promptIterations = 0;
+  let generationIterations = 0;
+  let finalImage: string | undefined;
+  let finalReview: any = undefined;
+
+  while (promptIterations < ITERATION_LIMITS.MAX_PROMPT_ITERATIONS) {
+    promptIterations++;
+    const promptReview = await reviewPromptQuality(genAI, analysisModels, promptText, originalImage, photoType, promptIterations);
+    const promptApproved = promptReview.approved ?? (promptReview.overallScore || 0) >= 70;
+    if (!promptApproved && promptIterations < ITERATION_LIMITS.MAX_PROMPT_ITERATIONS) {
+      promptText = refinePromptText(promptText, promptReview);
+      continue;
+    }
+
+    let genAttempts = 0;
+    let approved = false;
+    while (genAttempts < ITERATION_LIMITS.MAX_GENERATION_ITERATIONS) {
+      genAttempts++;
+      generationIterations++;
+      const generatedImage = await generateImageFromPrompt(genAI, generationModels, promptText, originalImage);
+      const comparePrompt = buildComparisonPrompt(originalImage, generatedImage, person, photoType);
+      const compareResponse = await generateContentWithFallback(genAI, analysisModels, [
+        { text: comparePrompt },
+        { inlineData: { data: originalImage.split(',')[1] || originalImage, mimeType: 'image/jpeg' } },
+        { inlineData: { data: generatedImage.split(',')[1] || generatedImage, mimeType: 'image/jpeg' } }
+      ]);
+      const text = compareResponse.response.text();
+      try {
+        finalReview = JSON.parse(text.replace(/```json/g, '').replace(/```/g, '').trim());
+      } catch (e) {
+        finalReview = {
+          identityMatch: { score: 75, confidence: 'Medium', verdict: 'Same person' },
+          overallScore: 75,
+          approved: true,
+          summary: 'Review completed'
+        };
+      }
+      finalImage = generatedImage;
+      approved = finalReview.approved ?? (finalReview.overallScore || 0) >= 70;
+      if (approved) {
+        break;
+      }
+    }
+
+    if (finalImage && (finalReview?.approved ?? (finalReview?.overallScore || 0) >= 70)) {
+      break;
+    }
+
+    if (promptIterations >= ITERATION_LIMITS.MAX_PROMPT_ITERATIONS) {
+      break;
+    }
+
+    promptText = refinePromptText(promptText, finalReview);
+  }
+
+  if (!finalImage) {
+    throw new Error('Failed to generate image after all attempts');
+  }
+
+  return {
+    image: finalImage,
+    review: finalReview || {
+      overallScore: 75,
+      approved: true,
+      summary: 'Image generated'
+    },
+    promptIterations,
+    generationIterations
+  };
+}
+
 // --- Main Handler ---
 
+// CORS headers configuration
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Signature, X-Timestamp, X-Action',
+};
+
+// Handle OPTIONS requests (CORS preflight)
+export async function onRequestOptions() {
+  return new Response(null, { 
+    status: 204,
+    headers: corsHeaders 
+  });
+}
+
 export async function onRequestPost({ request, env }: { request: Request; env: Env }) {
-  const cors = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Signature, X-Timestamp',
+  const cors = corsHeaders;
+
+  // 确保所有响应都是 JSON 格式
+  const jsonResponse = (data: any, status: number = 200) => {
+    return new Response(JSON.stringify(data), {
+      status,
+      headers: { ...cors, 'Content-Type': 'application/json' }
+    });
   };
 
-  if (request.method === 'OPTIONS') {
-    return new Response(null, { headers: cors });
-  }
-
-  if (!env.GEMINI_API_KEY) {
-    return new Response(JSON.stringify({ error: 'SERVICE_UNAVAILABLE', message: 'Missing API key' }), {
-      status: 503, headers: cors
-    });
-  }
-  if (!env.INVITE_CODES) {
-    return new Response(JSON.stringify({ error: 'SERVICE_UNAVAILABLE', message: 'Missing invite codes' }), {
-      status: 503, headers: cors
-    });
-  }
-
-  const config = parseConfig(env);
-
   try {
-    const bodyText = await request.text();
-    const body = JSON.parse(bodyText);
-    const { code, action, image, data } = body;
-
-    // Validate invite code
-    if (!validateInviteCode(code, config)) {
-      return new Response(JSON.stringify({ error: 'INVALID_INVITE_CODE' }), {
-        status: 401, headers: cors
-      });
+    if (!env.GEMINI_API_KEY) {
+      return jsonResponse({ error: 'SERVICE_UNAVAILABLE', message: 'Missing API key' }, 503);
     }
-    incrementCodeUsage(code);
+    if (!env.INVITE_CODES) {
+      return jsonResponse({ error: 'SERVICE_UNAVAILABLE', message: 'Missing invite codes' }, 503);
+    }
 
-    const normalizedEnv: Env = { ...DEFAULT_ENV, ...env } as Env;
-    const genAI = createGeminiClient(normalizedEnv.GEMINI_API_KEY);
-    const analysisModels = getModelCandidates('analysis', normalizedEnv);
-    const generationModels = getModelCandidates('generation', normalizedEnv);
-    let result: any;
+    const config = parseConfig(env);
 
-    switch (action) {
+    try {
+      const bodyText = await request.text();
+      const body = JSON.parse(bodyText);
+      const { code, action, image, data } = body;
+
+      // Validate invite code
+      if (!validateInviteCode(code, config)) {
+        return jsonResponse({ error: 'INVALID_INVITE_CODE' }, 401);
+      }
+      incrementCodeUsage(code);
+
+      const normalizedEnv: Env = { ...DEFAULT_ENV, ...env } as Env;
+      const genAI = createGeminiClient(normalizedEnv.GEMINI_API_KEY);
+      const analysisModels = getModelCandidates('analysis', normalizedEnv);
+      const generationModels = getModelCandidates('generation', normalizedEnv);
+      let result: any;
+
+      switch (action) {
       case 'analyze': {
         // 使用 gemini-3-pro-preview 分析原图
         const prompt = buildAnalyzePrompt();
@@ -861,9 +1023,7 @@ Output strict JSON:
       case 'processPose': {
         const { originalImage, photoType, person: providedPerson } = data || {};
         if (!originalImage || !photoType) {
-          return new Response(JSON.stringify({ error: 'INVALID_REQUEST' }), {
-            status: 400, headers: cors
-          });
+          return jsonResponse({ error: 'INVALID_REQUEST', message: 'Missing originalImage or photoType' }, 400);
         }
 
         let person = providedPerson;
@@ -937,9 +1097,7 @@ Output strict JSON:
         }
 
         if (!finalImage) {
-          return new Response(JSON.stringify({ error: 'IMAGE_GENERATION_FAILED' }), {
-            status: 500, headers: cors
-          });
+          return jsonResponse({ error: 'IMAGE_GENERATION_FAILED', message: 'Failed to generate image after all attempts' }, 500);
         }
 
         result = {
@@ -955,22 +1113,101 @@ Output strict JSON:
         break;
       }
 
+      case 'submitJob': {
+        // 提交异步任务
+        const { action: jobAction, image, data: jobData } = data || {};
+        if (!jobAction) {
+          return jsonResponse({ error: 'INVALID_REQUEST', message: 'Missing job action' }, 400);
+        }
+
+        const job = createJob(jobAction, { image, data: jobData });
+
+        // 在后台处理任务 (使用 ctx.waitUntil 如果可用)
+        const processJob = async () => {
+          try {
+            updateJob(job.id, { status: 'processing' });
+
+            let jobResult: any;
+            switch (jobAction) {
+              case 'processPose': {
+                const { originalImage, photoType, person: providedPerson } = jobData || {};
+                jobResult = await processPoseInBackground(genAI, analysisModels, generationModels, originalImage, photoType, providedPerson);
+                break;
+              }
+              case 'analyze': {
+                const imageData = image?.split(',')[1] || image;
+                const parts = [
+                  { text: buildAnalyzePrompt() },
+                  { inlineData: { data: imageData, mimeType: 'image/jpeg' } }
+                ];
+                const response = await generateContentWithFallback(genAI, analysisModels, parts);
+                const text = response.response.text();
+                jobResult = JSON.parse(text.replace(/```json/g, '').replace(/```/g, '').trim());
+                break;
+              }
+              default:
+                throw new Error(`Unsupported job action: ${jobAction}`);
+            }
+
+            updateJob(job.id, { status: 'completed', result: jobResult });
+          } catch (e: any) {
+            console.error(`[Job ${job.id}] Error:`, e);
+            updateJob(job.id, { status: 'failed', error: e.message });
+          }
+        };
+
+        // 启动后台处理
+        processJob().catch(console.error);
+
+        // 立即返回 jobId
+        result = { jobId: job.id, status: job.status };
+        break;
+      }
+
+      case 'getJobStatus': {
+        // 查询任务状态
+        const { jobId } = data || {};
+        if (!jobId) {
+          return jsonResponse({ error: 'INVALID_REQUEST', message: 'Missing jobId' }, 400);
+        }
+
+        const job = getJob(jobId);
+        if (!job) {
+          return jsonResponse({ error: 'JOB_NOT_FOUND', message: 'Job not found or expired' }, 404);
+        }
+
+        result = {
+          jobId: job.id,
+          status: job.status,
+          action: job.action,
+          result: job.result,
+          error: job.error,
+          createdAt: job.createdAt,
+          updatedAt: job.updatedAt,
+        };
+        break;
+      }
+
       default:
-        return new Response(JSON.stringify({ error: 'INVALID_ACTION' }), {
-          status: 400, headers: cors
-        });
+        return jsonResponse({ error: 'INVALID_ACTION', message: `Unknown action: ${action}` }, 400);
     }
 
-    return new Response(JSON.stringify({ result, action }), {
-      headers: { ...cors, 'Content-Type': 'application/json' }
-    });
+    return jsonResponse({ result, action });
 
+    } catch (e: any) {
+      console.error('[ERROR]', e);
+      return jsonResponse({
+        error: 'PROCESSING_ERROR',
+        message: e.message || 'Unknown error',
+        stack: e.stack
+      }, 500);
+    }
   } catch (e: any) {
-    console.error('[ERROR]', e.message);
-    return new Response(JSON.stringify({
-      error: 'PROCESSING_ERROR',
-      message: e.message,
-      stack: e.stack
-    }), { status: 500, headers: cors });
+    // 捕获外部错误（如配置错误）
+    console.error('[FATAL ERROR]', e);
+    return jsonResponse({
+      error: 'SERVICE_ERROR',
+      message: e.message || 'Service configuration error',
+    }, 503);
   }
 }
